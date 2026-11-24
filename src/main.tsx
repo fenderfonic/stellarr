@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { entityKind, indexGraph, otherEnd, prepareSearch, searchEntities } from "./exploration";
-import { FilamentScene, type CameraPose, type SceneView } from "./filament-scene";
+import { FilamentScene, layout, type CameraPose, type EntityFocus, type Landmark, type SceneView } from "./filament-scene";
 import type { Filament, Galaxy, MediaGraph, MediaNode } from "./graph";
 import { replayOrder } from "./replay";
 import "./style.css";
@@ -9,9 +9,98 @@ import "./style.css";
 const galaxies: Galaxy[] = ["Movies", "Television", "Music"];
 const overviewLimit = 14_000;
 const focusLimit = 12;
+const titleKinds = new Set(["Movie", "Series", "MusicAlbum"]);
+type Route = { node: MediaNode; edge?: Filament };
+type Browse = "nearby" | "connections";
 
-type View = { entity?: string; edge?: string; query: string; galaxy: string; status: string; genre: string; match: number };
-const homeView: View = { query: "", galaxy: "", status: "", genre: "", match: 0 };
+type View = {
+  entity?: string;
+  edge?: string;
+  region?: Galaxy;
+  query: string;
+  status: string;
+  genre: string;
+  cursor: number;
+  browse: Browse;
+  season: string;
+  details: boolean;
+};
+const homeView: View = { query: "", status: "", genre: "", cursor: 0, browse: "nearby", season: "", details: false };
+
+function Artwork({ node }: { node: MediaNode }) {
+  return <div className="artwork">
+    {node.artwork && <img key={node.artwork} src={node.artwork} alt="" draggable={false}
+      referrerPolicy="no-referrer" onError={(event) => { event.currentTarget.hidden = true; }} />}
+  </div>;
+}
+
+function Orbit({ routes, cursor, browse, change, visit }: {
+  routes: Route[];
+  cursor: number;
+  browse: Browse | "matches";
+  change: (cursor: number) => void;
+  visit: (route: Route) => void;
+}) {
+  const touchOrigin = useRef<{ x: number; y: number } | null>(null);
+  const index = Math.min(cursor, Math.max(0, routes.length - 1));
+  const step = (direction: number) => change(Math.min(routes.length - 1, Math.max(0, index + direction)));
+  if (!routes.length) return null;
+  return <section className="orbit" aria-label="Artwork orbit" tabIndex={0}
+    onKeyDown={(event) => {
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault();
+        step(event.key === "ArrowLeft" ? -1 : 1);
+      } else if (event.key === "Enter" && event.target === event.currentTarget) {
+        visit(routes[index]);
+      }
+    }}
+    onTouchStart={(event) => {
+      const touch = event.touches[0];
+      touchOrigin.current = event.touches.length === 1 ? { x: touch.clientX, y: touch.clientY } : null;
+    }}
+    onTouchCancel={() => { touchOrigin.current = null; }}
+    onTouchEnd={(event) => {
+      const origin = touchOrigin.current;
+      touchOrigin.current = null;
+      if (!origin) return;
+      const touch = event.changedTouches[0];
+      const dx = touch.clientX - origin.x;
+      const dy = touch.clientY - origin.y;
+      if (Math.abs(dx) > 35 && Math.abs(dx) > Math.abs(dy)) {
+        event.preventDefault();
+        step(dx > 0 ? -1 : 1);
+      } else if (Math.hypot(dx, dy) < 10 && event.target instanceof Element) {
+        const button = event.target.closest("button");
+        if (button) {
+          event.preventDefault();
+          button.click();
+        }
+      }
+    }}>
+    <div className="orbit-track">
+      <button type="button" className="orbit-arrow" aria-label="Previous in orbit" disabled={index === 0} onClick={() => step(-1)}>‹</button>
+      <div className="orbit-cards">
+        {[-1, 0, 1].map((offset) => {
+          const route = routes[index + offset];
+          if (!route) return <div className="orbit-slot" key={offset} />;
+          const { node, edge } = route;
+          return <div className="orbit-slot" key={offset}>
+            <button type="button" className="orbit-card" data-offset={offset} onClick={() => visit(route)}>
+              <Artwork node={node} />
+              <span className="orbit-title">{node.name}</span>
+              <small>{edge ? edge.label : [entityKind(node), node.year].filter(Boolean).join(" · ")}</small>
+            </button>
+          </div>;
+        })}
+      </div>
+      <button type="button" className="orbit-arrow" aria-label="Next in orbit" disabled={index + 1 >= routes.length} onClick={() => step(1)}>›</button>
+    </div>
+    <p className="orbit-status" aria-live="polite">
+      {browse === "matches" ? "Search matches" : browse === "connections" ? "Catalogue relationships" : "Nearby in the map"}
+      <span> · </span>{(index + 1).toLocaleString()} of {routes.length.toLocaleString()}
+    </p>
+  </section>;
+}
 
 function Explorer({ graph }: { graph: MediaGraph }) {
   const model = useMemo(() => {
@@ -37,16 +126,22 @@ function Explorer({ graph }: { graph: MediaGraph }) {
       }
     }
     const isolated = graph.nodes.filter((node) => !index.neighbors.has(node.id)).slice(0, 2000);
-    const availableGalaxies = new Set(graph.nodes.map((node) => node.galaxy));
+    const geometryLayout = layout(edges);
+    const position = (node: MediaNode) => geometryLayout.positions.get(node.id) ?? geometryLayout.place(node);
+    const titles = graph.nodes.filter((node) => titleKinds.has(node.kind));
+    const regions = galaxies.flatMap((galaxy) => {
+      const members = titles.filter((node) => node.galaxy === galaxy);
+      if (!members.length) return [];
+      const center = position(members[0]).clone().setScalar(0);
+      for (const member of members) center.add(position(member));
+      center.divideScalar(members.length);
+      const byDistance = members.map((node) => ({ node, distance: center.distanceToSquared(position(node)) }))
+        .sort((a, b) => a.distance - b.distance);
+      return [{ galaxy, center, distance: Math.max(30, Math.sqrt(byDistance.at(-1)!.distance) * 2.7),
+        members: byDistance.map(({ node }) => node) }];
+    });
     const genres = [...new Set(graph.nodes.flatMap((node) => node.genres ?? []))].sort();
-    const starts = graph.mode === "demo" ? ["film-0", "series-0", "album-0"].map((id) => nodes.get(id)!)
-      : galaxies.flatMap((galaxy) => {
-        const candidate = graph.nodes.find((node) => node.galaxy === galaxy &&
-          ["Movie", "Series", "MusicAlbum"].includes(node.kind) && index.neighbors.has(node.id))
-          ?? graph.nodes.find((node) => node.galaxy === galaxy);
-        return candidate ? [candidate] : [];
-      });
-    return { index, filaments, isolated, availableGalaxies, genres, starts,
+    return { index, filaments, isolated, geometryLayout, position, titles, regions, genres,
       ordered: replayOrder(filaments), search: prepareSearch(index.entities.values()) };
   }, [graph]);
 
@@ -55,38 +150,77 @@ function Explorer({ graph }: { graph: MediaGraph }) {
   const [camera, setCamera] = useState<{ revision: number; pose?: CameraPose }>({ revision: 0 });
   const [revealed, setRevealed] = useState<number | null>(null);
   const sceneView = useRef<SceneView>(null);
-
+  const search = useRef<HTMLInputElement>(null);
   const entity = model.index.entities.get(view.entity ?? "");
-  const focus = useMemo(() => {
-    if (!entity) return undefined;
-    const edges = (model.index.neighbors.get(entity.id) ?? []).slice(0, focusLimit);
+  const region = model.regions.find((entry) => entry.galaxy === view.region);
+  const filtering = Boolean(view.query.trim() || view.status || view.genre);
+  const results = useMemo(() => filtering
+    ? searchEntities(model.search, view.query, view.region ?? "", view.status, view.genre) : [],
+  [model, filtering, view.query, view.region, view.status, view.genre]);
+  const matches = useMemo(() => filtering ? new Set(results.map((node) => node.id)) : null, [filtering, results]);
+
+  const connections = useMemo(() => {
+    if (!entity) return [];
+    return (model.index.neighbors.get(entity.id) ?? []).map((edge) => ({ edge, node: otherEnd(edge, entity.id) }))
+      .sort((a, b) => Number(b.node.kind === "Collection") - Number(a.node.kind === "Collection") ||
+        Number(titleKinds.has(b.node.kind)) - Number(titleKinds.has(a.node.kind)) ||
+        (a.node.season ?? 0) - (b.node.season ?? 0) || (a.node.episode ?? 0) - (b.node.episode ?? 0));
+  }, [entity, model]);
+  const seasons = useMemo(() => [...new Set(connections.flatMap(({ node }) =>
+    node.season === undefined ? [] : [node.season]))], [connections]);
+  const related = useMemo(() => view.season === "" ? connections
+    : connections.filter(({ node }) => String(node.season) === view.season), [connections, view.season]);
+  const nearby = useMemo(() => {
+    if (!entity) return [];
+    const center = model.position(entity);
+    const linked = new Set(connections.map(({ node }) => node.id));
+    return model.titles.filter((node) => node.galaxy === entity.galaxy && node.id !== entity.id && !linked.has(node.id))
+      .map((node) => ({ node, distance: center.distanceToSquared(model.position(node)) }))
+      .sort((a, b) => a.distance - b.distance).slice(0, 24);
+  }, [entity, connections, model]);
+
+  const focus = useMemo<EntityFocus | undefined>(() => {
+    if (!entity) return region && { center: region.center, distance: region.distance, edges: [] };
+    const edges = connections.slice(0, focusLimit).map(({ edge }) => edge);
     const selected = model.index.edges.get(view.edge ?? "");
     if (selected && !edges.includes(selected)) edges.unshift(selected);
-    return { entity, edges };
-  }, [model, entity, view.edge]);
+    return { entity, center: model.position(entity), edges };
+  }, [entity, region, model, connections, view.edge]);
 
-  const filtering = Boolean(view.query.trim() || view.galaxy || view.status || view.genre);
-  const results = useMemo(() => filtering
-    ? searchEntities(model.search, view.query, view.galaxy, view.status, view.genre) : [],
-  [model, filtering, view.query, view.galaxy, view.status, view.genre]);
-  const matches = useMemo(() => filtering ? new Set(results.map((node) => node.id)) : null, [filtering, results]);
-  const result = results[view.match];
+  const searchRoutes = useMemo(() => results.map((node) => ({ node })), [results]);
+  const regionRoutes = useMemo(() => region?.members.slice(0, 32).map((node) => ({ node })) ?? [], [region]);
+  const browsingMatches = filtering && !entity;
+  const routes = browsingMatches ? searchRoutes : entity
+    ? (view.browse === "connections" ? related : nearby) : regionRoutes;
 
-  const visit = useCallback((next: MediaNode, edge?: Filament, match?: number) => {
+  function navigate(next: View) {
     const pose = sceneView.current?.pose();
     setHistory((previous) => [...previous, { view, pose }]);
-    setView({ ...view, entity: next.id, edge: edge?.id, match: match ?? view.match });
+    setView(next);
     setCamera(({ revision }) => ({ revision: revision + 1 }));
-  }, [view]);
-  // Pointer selection must remain stable across view changes to keep the WebGL scene mounted.
-  const visitRef = useRef(visit);
-  useEffect(() => { visitRef.current = visit; }, [visit]);
+  }
+
+  const visitRef = useRef<(node: MediaNode, edge?: Filament) => void>(() => {});
+  visitRef.current = (node, edge) => {
+    if (node.id === view.entity && !edge) return;
+    const browse = model.index.neighbors.has(node.id) ? "connections" : "nearby";
+    navigate({ ...view, entity: node.id, edge: edge?.id, browse, cursor: 0, season: "", details: false });
+  };
   const selectEdge = useCallback((id: string) => {
     const edge = model.index.edges.get(id);
-    if (edge) visitRef.current(edge.from.kind === "Person" ? edge.to : edge.from, edge);
+    if (!edge) return;
+    const current = visitOrigin.current;
+    const next = current === edge.from.id || current === edge.to.id ? otherEnd(edge, current)
+      : edge.from.kind === "Person" ? edge.to : edge.from;
+    visitRef.current(next, edge);
   }, [model]);
-
+  const visitOrigin = useRef(view.entity);
+  visitOrigin.current = view.entity;
   const selectNode = useCallback((node: MediaNode) => visitRef.current(node), []);
+
+  function enter(galaxy: Galaxy) {
+    navigate({ ...view, region: galaxy, entity: undefined, edge: undefined, cursor: 0, season: "", details: false });
+  }
 
   function back() {
     const previous = history.at(-1);
@@ -103,107 +237,139 @@ function Explorer({ graph }: { graph: MediaGraph }) {
   }
 
   function filter(patch: Partial<View>) {
-    setView((current) => ({ ...current, ...patch, match: 0 }));
+    setView((current) => ({ ...current, ...patch, entity: undefined, edge: undefined,
+      cursor: 0, season: "", details: false }));
+    setCamera(({ revision }) => ({ revision: revision + 1 }));
+  }
+
+  useEffect(() => {
+    const find = (event: KeyboardEvent) => {
+      if (event.key !== "/" || event.ctrlKey || event.altKey || event.metaKey ||
+        (event.target instanceof HTMLElement && event.target.closest("input, select, textarea, [contenteditable]"))) return;
+      event.preventDefault();
+      search.current?.focus();
+    };
+    window.addEventListener("keydown", find);
+    return () => window.removeEventListener("keydown", find);
+  }, []);
+
+  const landmarks: Landmark[] = [];
+  const addPins = (entries: Route[], limit: number, range?: number) => {
+    for (const { node, edge } of entries.slice(Math.max(0, view.cursor - 1), Math.max(0, view.cursor - 1) + limit)) {
+      landmarks.push({ id: edge?.id ?? node.id, name: node.name, caption: edge?.label, range,
+        position: model.position(node), kind: "title", select: () => visitRef.current(node, edge) });
+    }
+  };
+  if (entity) {
+    landmarks.push({ id: entity.id, position: model.position(entity), name: entity.name, kind: "focus" });
+    addPins(routes, 6, 42);
+  } else {
+    if (!region) {
+      for (const entry of model.regions) {
+        const count = matches ? entry.members.filter((node) => matches.has(node.id)).length : entry.members.length;
+        landmarks.push({ id: entry.galaxy, position: entry.center, name: entry.galaxy, kind: "galaxy",
+          caption: matches ? `${count} matching titles` : `${count} titles`, select: () => enter(entry.galaxy) });
+      }
+    }
+    if (region || browsingMatches) addPins(routes, 9, region && !browsingMatches ? 52 : undefined);
+    else addPins(model.regions.flatMap((entry) => entry.members.slice(0, 5).map((node) => ({ node }))), 15, 44);
   }
 
   return (
     <main className="shell">
-      <header className="masthead">
-        <h1>Stellarr</h1>
-        <p>{graph.mode === "demo" ? "Synthetic catalogue" :
-          (graph.sources ?? []).map((source) => source === "radarr" ? "Radarr" : "Sonarr").join(" + ") || "Catalogue"} <span>·</span> {graph.nodes.length.toLocaleString()} entities <span>·</span> {graph.links.length.toLocaleString()} filaments</p>
-      </header>
+      <section className="universe" aria-label="Media universe">
+        {graph.nodes.length > 0 ? <FilamentScene filaments={model.filaments} ordered={model.ordered} selected={view.edge}
+          geometryLayout={model.geometryLayout} landmarks={landmarks} entityFocus={focus}
+          cameraRequest={camera.revision} restoredPose={camera.pose} sceneView={sceneView}
+          matches={entity ? null : matches} onSelect={selectEdge} onReveal={setRevealed}
+          isolated={model.isolated} onSelectNode={selectNode} /> :
+          <p className="scene-message">No media in the local catalogue. Synchronise a source or open Demo.</p>}
 
-      <div className="toolbar">
-        <nav aria-label="Exploration history">
-          <button onClick={back} disabled={!history.length}>← Back</button>
-          <button onClick={home}>Home</button>
-          {graph.mode === "catalogue" && <a className="mode-link" href="?demo=1">Demo</a>}
-          {graph.mode === "demo" && new URLSearchParams(location.search).has("demo") &&
-            <a className="mode-link" href="./">Catalogue</a>}
-        </nav>
-        <nav aria-label="Galaxies" className="galaxies">
-          {["All galaxies", ...galaxies.filter((galaxy) => model.availableGalaxies.has(galaxy))].map((label, i) => {
-            const galaxy = i ? label : "";
-            return <button key={label} aria-pressed={view.galaxy === galaxy} onClick={() => filter({ galaxy })}>{label}</button>;
-          })}
-        </nav>
-      </div>
-
-      <div className="cockpit">
-        <section className="universe" aria-label="Media universe">
-          {graph.nodes.length > 0 ? <FilamentScene filaments={model.filaments} ordered={model.ordered} selected={view.edge}
-            entityFocus={focus} cameraRequest={camera.revision} restoredPose={camera.pose} sceneView={sceneView}
-            matches={matches} onSelect={selectEdge} onReveal={setRevealed}
-            isolated={model.isolated} onSelectNode={selectNode} /> :
-            <p className="empty-scene">No media in the local catalogue. Test and synchronise a source, or open Demo.</p>}
-          <div className="map-caption">
-            <span>{revealed === null ? model.filaments.length.toLocaleString() : revealed.toLocaleString()} visible overview filaments</span>
-            <span>{entity ? entity.name : "Universe overview"}</span>
+        <header className="flight-header">
+          <div className="masthead">
+            <h1>Stellarr</h1>
+            <p>{graph.mode === "demo" ? "Demo universe" : (graph.sources ?? []).map((source) =>
+              source === "radarr" ? "Radarr" : "Sonarr").join(" + ") || "Catalogue"}</p>
           </div>
-        </section>
+          <nav aria-label="Exploration history">
+            <button type="button" onClick={back} disabled={!history.length}>← Back</button>
+            <button type="button" onClick={home}>Home</button>
+          </nav>
+        </header>
 
-        <aside className="panel" aria-label="Catalogue and selection">
-          <form onSubmit={(event) => { event.preventDefault(); if (result) visit(result); }}>
-            <label htmlFor="search">Find media</label>
-            <input id="search" type="search" placeholder="Title, person or media type" value={view.query}
-              onChange={(event) => filter({ query: event.target.value })} />
-            <label htmlFor="availability">Availability</label>
-            <select id="availability" value={view.status} onChange={(event) => filter({ status: event.target.value })}>
-              <option value="">Any availability</option>
-              <option>Owned</option><option>Monitored</option><option>Unmonitored</option><option>External discovery</option>
-            </select>
-            {model.genres.length > 0 && <div className="genre-filter">
-              <label htmlFor="genre">Genre</label>
-              <select id="genre" value={view.genre} onChange={(event) => filter({ genre: event.target.value })}>
+        <div className="search-dock">
+          <form role="search" onSubmit={(event) => {
+            event.preventDefault();
+            const match = results[view.cursor] ?? results[0];
+            if (match) { visitRef.current(match); search.current?.blur(); }
+          }}>
+            <span className="search-icon" aria-hidden="true">⌕</span>
+            <input ref={search} type="search" aria-label="Search the universe" placeholder="Search the universe"
+              value={view.query} onChange={(event) => filter({ query: event.target.value })} />
+            <kbd aria-hidden="true">/</kbd>
+          </form>
+          <details className="filter-menu">
+            <summary>Filters{view.genre || view.status ? " •" : ""}</summary>
+            <div className="filters">
+              <label>Availability<select value={view.status} onChange={(event) => filter({ status: event.target.value })}>
+                <option value="">Any availability</option>
+                <option>Owned</option><option>Monitored</option><option>Unmonitored</option><option>External discovery</option>
+              </select></label>
+              <label>Genre<select value={view.genre} onChange={(event) => filter({ genre: event.target.value })}>
                 <option value="">Any genre</option>
                 {model.genres.map((genre) => <option key={genre}>{genre}</option>)}
-              </select>
-            </div>}
-            {filtering && <div className="matches">
-              <p role="status">{results.length ? `${view.match + 1} of ${results.length.toLocaleString()} matches` : "No matches"}</p>
-              {result && <div className="match-controls">
-                <button type="button" aria-label="Previous match" disabled={view.match === 0}
-                  onClick={() => visit(results[view.match - 1], undefined, view.match - 1)}>‹</button>
-                <button type="submit" className="match-title">{result.name}</button>
-                <button type="button" aria-label="Next match" disabled={view.match + 1 === results.length}
-                  onClick={() => visit(results[view.match + 1], undefined, view.match + 1)}>›</button>
-              </div>}
-            </div>}
-          </form>
+              </select></label>
+            </div>
+          </details>
+        </div>
 
-          {focus ? <section className="selection" aria-label="Selected media">
-            <p className="meta">{[entityKind(focus.entity), focus.entity.galaxy, focus.entity.year].filter(Boolean).join(" · ")}</p>
-            <h2>{focus.entity.name}</h2>
-            {focus.entity.artwork && <img className="media-artwork" key={focus.entity.artwork}
-              src={focus.entity.artwork} alt={`Artwork for ${focus.entity.name}`}
-              referrerPolicy="no-referrer" onError={(event) => { event.currentTarget.hidden = true; }} />}
-            {focus.entity.seriesTitle && <p className="meta">{focus.entity.seriesTitle} · S{focus.entity.season} E{focus.entity.episode}</p>}
-            {focus.entity.date && <p className="meta"><time>{focus.entity.date.slice(0, 10)}</time></p>}
-            {Boolean(focus.entity.genres?.length) && <p className="meta">{focus.entity.genres?.join(" · ")}</p>}
-            {focus.entity.externalIds && <p className="meta">{Object.entries(focus.entity.externalIds)
-              .map(([provider, id]) => `${provider} ${id}`).join(" · ")}</p>}
-            {focus.entity.availability && <p className="availability">{focus.entity.availability}</p>}
-            {focus.entity.summary && <p className="summary">{focus.entity.summary}</p>}
-            <h3>Connections</h3>
-            {focus.edges.length ? <ul>{focus.edges.map((edge) => {
-              const next = otherEnd(edge, focus.entity.id);
-              return <li key={edge.id}>
-                <button aria-current={view.edge === edge.id ? "true" : undefined} onClick={() => visit(next, edge)}>
-                  <span>{next.name}</span><small>{edge.label} · {entityKind(next)}{edge.details?.length ? ` · ${edge.details.join(", ")}` : ""}</small>
-                </button>
-              </li>;
-            })}</ul> : <p className="meta">No catalogue connections</p>}
-          </section> : model.starts.length > 0 && <section className="selection">
-            <h2>Starting points</h2>
-            <ul>{model.starts.map((start) => {
-              return <li key={start.id}><button onClick={() => visit(start)}>
-                <span>{start.name}</span><small>{start.galaxy}</small>
-              </button></li>;
-            })}</ul>
-          </section>}
-        </aside>
-      </div>
+        <div className="flight-deck">
+          {entity ? <section className="focus-card" aria-label="Selected media">
+            <header>
+              <div className="focus-title">
+                <Artwork node={entity} />
+                <div>
+                  <small>{[entityKind(entity), entity.year, entity.availability].filter(Boolean).join(" · ")}</small>
+                  <h2>{entity.name}</h2>
+                  <button type="button" className="detail-toggle" aria-expanded={view.details}
+                    onClick={() => setView({ ...view, details: !view.details })}>{view.details ? "Hide details −" : "Details +"}</button>
+                </div>
+              </div>
+              <div className="browse-switch" role="group" aria-label="Browse around selection">
+                <button type="button" aria-pressed={view.browse === "connections"} disabled={!connections.length}
+                  onClick={() => setView({ ...view, browse: "connections", cursor: 0 })}>Connections</button>
+                <button type="button" aria-pressed={view.browse === "nearby"} disabled={!nearby.length}
+                  onClick={() => setView({ ...view, browse: "nearby", cursor: 0 })}>Nearby</button>
+              </div>
+            </header>
+            {view.details && <div className="focus-details">
+              {entity.seriesTitle && <p>{entity.seriesTitle} · S{entity.season} E{entity.episode}</p>}
+              {entity.date && <p><time>{entity.date.slice(0, 10)}</time></p>}
+              {entity.genres?.length ? <p>{entity.genres.join(" · ")}</p> : null}
+              {entity.summary && <p>{entity.summary}</p>}
+              {entity.externalIds && <small>{Object.entries(entity.externalIds).map(([provider, id]) => `${provider} ${id}`).join(" · ")}</small>}
+            </div>}
+            {view.browse === "connections" && seasons.length > 0 && <label className="season">Season
+              <select value={view.season} onChange={(event) => setView({ ...view, season: event.target.value, cursor: 0 })}>
+                <option value="">All seasons</option>
+                {seasons.map((season) => <option key={season} value={season}>{season || "Specials"}</option>)}
+              </select>
+            </label>}
+          </section> : region && <p className="region-name">{region.galaxy}</p>}
+
+          {browsingMatches && !routes.length && <p className="region-name" role="status">No matches{region ? " in this galaxy" : ""}</p>}
+          <Orbit routes={routes} cursor={view.cursor} browse={browsingMatches ? "matches" : entity ? view.browse : "nearby"}
+            change={(cursor) => setView({ ...view, cursor })}
+            visit={({ node, edge }) => visitRef.current(node, edge)} />
+        </div>
+
+        <footer className="flight-footer">
+          <span>{revealed === null ? `${graph.nodes.length.toLocaleString()} entities · ${model.filaments.length.toLocaleString()} visible filaments`
+            : `${revealed.toLocaleString()} filaments revealed`}</span>
+          {!entity && !region && !browsingMatches && <span className="flight-help">Choose a galaxy or search <span>·</span> Drag to orbit</span>}
+          {graph.mode === "catalogue" ? <a href="?demo=1">Demo</a> : new URLSearchParams(location.search).has("demo") && <a href="./">Catalogue</a>}
+        </footer>
+      </section>
     </main>
   );
 }

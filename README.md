@@ -41,7 +41,11 @@ Run `sync` again and reload the cockpit to refresh the view. Add `radarr` or `so
 
 ## Explore
 
-Drag to orbit, right-drag to pan and scroll to zoom. On touch screens, drag with one finger to orbit or use two fingers to pan and pinch. Search titles, people, genres or IDs and filter by galaxy, availability or genre. Press Enter on a match to focus it, or select a filament directly. Follow connections from the selection panel. Back restores the preceding selection, filters and camera. Home returns to the starting view. Replay progressively reveals filaments.
+Press **/** to search titles, people, genres or IDs. Search lights the relevant filaments and puts matches in the artwork orbit. Choose a galaxy label to fly into its region, then pick a title from the map or the orbit. Drag to orbit, right-drag to pan and scroll to zoom. On touch screens, drag with one finger or use two fingers to pan and pinch.
+
+Use the orbit arrows, Left and Right keys while the orbit has focus, or swipe to browse. Select a card or press Enter with the orbit focused to fly to it. **Nearby** uses spatial distance. **Connections** follows actual catalogue links, including collections, credits and series episodes. At focus, select an illuminated filament to follow it, open **Details** for metadata or choose a season to browse its episodes.
+
+**Back** restores the preceding selection, search, orbit and camera. **Home** returns to the galaxy overview. **Replay** progressively reveals filaments.
 
 ## Catalogue coverage
 

@@ -20,7 +20,7 @@ function scatter(id: string, radius: number) {
   return new T.Vector3(Math.cos(theta) * ring, y * 0.65, Math.sin(theta) * ring).multiplyScalar(depth);
 }
 
-function layout(edges: Filament[]) {
+export function layout(edges: Filament[]) {
   const nodes = new Map<string, MediaNode>();
   const parents = new Map<string, MediaNode>();
   const firstCredit = new Map<string, MediaNode>();
@@ -74,12 +74,23 @@ const silver = new T.Color("#b5c8d6");
 export type CameraPose = { position: T.Vector3; target: T.Vector3 };
 export type SceneView = { pose: () => CameraPose };
 
-export type EntityFocus = { entity: MediaNode; edges: Filament[] };
+export type EntityFocus = { center: T.Vector3; edges: Filament[]; distance?: number; entity?: MediaNode };
+export type Landmark = {
+  id: string;
+  position: T.Vector3;
+  name: string;
+  caption?: string;
+  range?: number;
+  kind: "galaxy" | "title" | "focus";
+  select?: () => void;
+};
 
-export function FilamentScene({ filaments, ordered, selected, entityFocus, cameraRequest, restoredPose, sceneView, matches, onSelect, onReveal, isolated, onSelectNode }: {
+export function FilamentScene({ filaments, ordered, selected, geometryLayout, landmarks, entityFocus, cameraRequest, restoredPose, sceneView, matches, onSelect, onReveal, isolated, onSelectNode }: {
   filaments: Filament[];
   ordered: Filament[];
   selected?: string;
+  geometryLayout: ReturnType<typeof layout>;
+  landmarks: Landmark[];
   entityFocus?: EntityFocus;
   cameraRequest: number;
   restoredPose?: CameraPose;
@@ -91,6 +102,10 @@ export function FilamentScene({ filaments, ordered, selected, entityFocus, camer
   onReveal: (count: number | null) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
+  const pins = useRef<HTMLDivElement>(null);
+  const updatePins = useRef(() => {});
+  const [hovered, setHovered] = useState<{ x: number; y: number; text: string }>();
+  useEffect(() => { updatePins.current(); }, [landmarks]);
   const active = useRef<(id?: string) => void>(() => {});
   const selection = useRef(selected);
   const matchRequest = useRef(matches);
@@ -126,17 +141,16 @@ export function FilamentScene({ filaments, ordered, selected, entityFocus, camer
     canvas.setAttribute("role", "img");
     mount.appendChild(canvas);
 
-    const { positions, place } = layout(filaments);
+    const { positions, place } = geometryLayout;
     // Render unlinked catalogue entries as points with the existing placement and palette.
     const starCoordinates = new Float32Array(isolated.length * 3);
     isolated.forEach((node, index) => {
       const point = place(node);
-      positions.set(node.id, point);
       point.toArray(starCoordinates, index * 3);
     });
     const scene = new T.Scene();
     const camera = new T.PerspectiveCamera(42, 1, 0.2, 550);
-    const bounds = new T.Box3().setFromPoints([...positions.values()]).getBoundingSphere(new T.Sphere());
+    const bounds = new T.Box3().setFromPoints([...positions.values(), ...isolated.map(place)]).getBoundingSphere(new T.Sphere());
     const controls = new OrbitControls(camera, canvas);
     controls.target.copy(bounds.center);
     camera.position.copy(bounds.center).add(new T.Vector3(0.22, 0.46, 1).normalize().multiplyScalar(Math.max(bounds.radius, 9) * 2.66));
@@ -217,10 +231,35 @@ export function FilamentScene({ filaments, ordered, selected, entityFocus, camer
     let firstDraw = true;
     let sized = false;
     let visible = ordered.length;
+    const projected = new T.Vector3();
+    const updateLandmarks = () => {
+      const occupied: { x: number; y: number; width: number }[] = [];
+      const width = mount.clientWidth;
+      const height = mount.clientHeight;
+      for (const element of pins.current?.children ?? []) {
+        const pin = element as HTMLElement;
+        const world = pin.dataset.world!.split(",").map(Number);
+        projected.fromArray(world);
+        const withinRange = !pin.dataset.range || projected.distanceToSquared(camera.position) <= Number(pin.dataset.range) ** 2;
+        projected.project(camera);
+        const x = width * (0.5 + projected.x / 2);
+        const y = height * (0.5 - projected.y / 2);
+        const half = pin.dataset.kind === "galaxy" ? 77 : 73;
+        const shown = withinRange && projected.z >= -1 && projected.z <= 1 &&
+          x > half && x < width - half && y > (width < 621 ? 140 : 95) && y < height - 54 &&
+          !occupied.some((other) => Math.abs(other.y - y) < 38 && Math.abs(other.x - x) < other.width + half);
+        pin.style.visibility = shown ? "visible" : "hidden";
+        if (!shown) continue;
+        occupied.push({ x, y, width: half });
+        pin.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%)`;
+      }
+    };
+    updatePins.current = () => { camera.updateMatrixWorld(); updateLandmarks(); };
     const draw = () => {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
         renderer.render(scene, camera);
+        updateLandmarks();
         if (firstDraw && sized) {
           performance.mark("stellarr:first-scene-frame");
           firstDraw = false;
@@ -282,7 +321,7 @@ export function FilamentScene({ filaments, ordered, selected, entityFocus, camer
         neighborGeometry.setDrawRange(0, localVisible.length * segments * 2);
       }
       neighborhood.visible = localVisible.length > 0;
-      marker.visible = Boolean(focusRequest.current) && visible === ordered.length;
+      marker.visible = Boolean(focusRequest.current?.entity) && visible === ordered.length;
       active.current(selection.current);
     };
     active.current(selection.current);
@@ -313,12 +352,13 @@ export function FilamentScene({ filaments, ordered, selected, entityFocus, camer
           points[i].toArray(localCoords, start + 3);
         }
       }
-      const center = request && position(request.entity);
+      const center = request?.center;
+      setHovered(undefined);
       if (center) {
         center.toArray(markerPoint.array);
         markerPoint.needsUpdate = true;
       }
-      material.opacity = request ? 0.30 : 1;
+      material.opacity = request?.entity ? 0.40 : 1;
       showNeighbors();
 
       const target = restored?.target ?? center ?? home.target;
@@ -326,10 +366,10 @@ export function FilamentScene({ filaments, ordered, selected, entityFocus, camer
       if (!restored && center && request) {
         let radius = 0;
         for (const edge of request.edges) {
-          const neighbor = position(edge.from.id === request.entity.id ? edge.to : edge.from);
+          const neighbor = position(edge.from.id === request.entity?.id ? edge.to : edge.from);
           radius = Math.max(radius, center.distanceTo(neighbor));
         }
-        const distance = T.MathUtils.clamp(radius * 1.35 + 8, 12, home.position.distanceTo(home.target) * 0.65);
+        const distance = request.distance ?? T.MathUtils.clamp(radius + 8, 12, home.position.distanceTo(home.target) * 0.56);
         destination = camera.position.clone().sub(controls.target).normalize().multiplyScalar(distance).add(center);
       }
       if (motion.matches) {
@@ -422,30 +462,68 @@ export function FilamentScene({ filaments, ordered, selected, entityFocus, camer
     motion.addEventListener("change", motionChanged);
 
     const ray = new T.Raycaster();
+    const pointer = new T.Vector2();
     let down: [number, number] | undefined;
-    const start = (event: PointerEvent) => { down = [event.clientX, event.clientY]; };
-    const pick = (event: PointerEvent) => {
-      if ((!visible && !isolated.length) || !down || event.button !== 0 || Math.hypot(event.clientX - down[0], event.clientY - down[1]) > 5) return;
+    let moved = false;
+    let lastHover = 0;
+    let hoveredEdge: string | undefined;
+    const clearHover = () => {
+      if (!hoveredEdge) return;
+      hoveredEdge = undefined;
+      setHovered(undefined);
+      canvas.style.cursor = "";
+      active.current(selection.current);
+    };
+    const start = (event: PointerEvent) => {
+      if (down) moved = true;
+      else { down = [event.clientX, event.clientY]; moved = false; }
+      clearHover();
+    };
+    const setRay = (event: PointerEvent) => {
       const rect = canvas.getBoundingClientRect();
-      ray.params.Line!.threshold = Math.max(0.08, camera.position.distanceTo(controls.target) / Math.max(rect.height, 1) * 4);
-      ray.setFromCamera(new T.Vector2(2 * (event.clientX - rect.left) / rect.width - 1,
+      ray.params.Line!.threshold = Math.max(0.12, camera.position.distanceTo(controls.target) / Math.max(rect.height, 1) * 8);
+      ray.setFromCamera(pointer.set(2 * (event.clientX - rect.left) / rect.width - 1,
         1 - 2 * (event.clientY - rect.top) / rect.height), camera);
-      const localHit = neighborhood.visible ? ray.intersectObject(neighborhood)[0] : undefined;
-      if (localHit?.index !== undefined) {
-        onSelect(localVisible[Math.floor(localHit.index / (segments * 2))].id);
-        return;
+      return rect;
+    };
+    const localEdge = () => {
+      const hit = neighborhood.visible ? ray.intersectObject(neighborhood)[0] : undefined;
+      return hit?.index === undefined ? undefined : localVisible[Math.floor(hit.index / (segments * 2))];
+    };
+    const move = (event: PointerEvent) => {
+      if (down && Math.hypot(event.clientX - down[0], event.clientY - down[1]) > 7) moved = true;
+      if (down || event.pointerType !== "mouse" || !localVisible.length || performance.now() - lastHover < 55) return;
+      lastHover = performance.now();
+      const rect = setRay(event);
+      const edge = localEdge();
+      if (!edge) { clearHover(); return; }
+      const origin = focusRequest.current?.entity?.id;
+      const next = edge.from.id === origin ? edge.to : edge.from;
+      canvas.style.cursor = "pointer";
+      if (hoveredEdge !== edge.id) {
+        hoveredEdge = edge.id;
+        active.current(edge.id);
       }
-      const hit = ray.intersectObject(network)[0];
-      const index = hit?.index === undefined ? -1 : Math.floor(hit.index / (segments * 2));
-      if (index >= 0 && index < visible) {
-        onSelect(ordered[index].id);
-        return;
-      }
+      setHovered({ x: Math.min(event.clientX - rect.left + 12, rect.width - 165),
+        y: event.clientY - rect.top - 34, text: `${edge.label} · ${next.name}` });
+    };
+    const cancelPick = () => { down = undefined; clearHover(); };
+    const pick = (event: PointerEvent) => {
+      const origin = down;
+      down = undefined;
+      if ((!visible && !isolated.length) || !origin || moved || event.button !== 0 ||
+        Math.hypot(event.clientX - origin[0], event.clientY - origin[1]) > 10) return;
+      setRay(event);
+      const edge = localEdge();
+      if (edge) { onSelect(edge.id); return; }
       if (isolated.length) {
         ray.params.Points!.threshold = ray.params.Line!.threshold;
         const star = ray.intersectObject(stars)[0];
-        if (star?.index !== undefined) onSelectNode(isolated[star.index]);
+        if (star?.index !== undefined) { onSelectNode(isolated[star.index]); return; }
       }
+      const hit = ray.intersectObject(network)[0];
+      const index = hit?.index === undefined ? -1 : Math.floor(hit.index / (segments * 2));
+      if (index >= 0 && index < visible) onSelect(ordered[index].id);
     };
     const lost = () => {
       now();
@@ -453,9 +531,13 @@ export function FilamentScene({ filaments, ordered, selected, entityFocus, camer
     };
     canvas.addEventListener("pointerdown", start);
     canvas.addEventListener("pointerup", pick);
+    canvas.addEventListener("pointermove", move);
+    canvas.addEventListener("pointerleave", clearHover);
+    canvas.addEventListener("pointercancel", cancelPick);
     canvas.addEventListener("webglcontextlost", lost);
     return () => {
       sceneView.current = null;
+      updatePins.current = () => {};
       active.current = () => {};
       illuminate.current = () => {};
       moveFocus.current = () => {};
@@ -469,6 +551,9 @@ export function FilamentScene({ filaments, ordered, selected, entityFocus, camer
       controls.dispose();
       canvas.removeEventListener("pointerdown", start);
       canvas.removeEventListener("pointerup", pick);
+      canvas.removeEventListener("pointermove", move);
+      canvas.removeEventListener("pointerleave", clearHover);
+      canvas.removeEventListener("pointercancel", cancelPick);
       canvas.removeEventListener("webglcontextlost", lost);
       geometry.dispose();
       starGeometry.dispose();
@@ -483,31 +568,28 @@ export function FilamentScene({ filaments, ordered, selected, entityFocus, camer
       renderer.dispose();
       canvas.remove();
     };
-  }, [filaments, ordered, onSelect, onReveal, sceneView, isolated, onSelectNode]);
+  }, [filaments, geometryLayout, ordered, onSelect, onReveal, sceneView, isolated, onSelectNode]);
 
   return (
-    <div className="relative h-[72vh] min-h-[390px] max-sm:pointer-coarse:h-[48svh] max-sm:pointer-coarse:min-h-[300px] overflow-hidden rounded-xl border border-[#28251e] bg-[radial-gradient(ellipse_at_52%_48%,#131211_0%,#0a0a09_49%,#050506_100%)]">
+    <div className="filament-scene">
       <div ref={host} className="absolute inset-0" />
-      {!unavailable && ordered.length > 0 && <div role="group" aria-label="Filament replay"
-        className="absolute right-4 top-4 flex gap-1 rounded-md border border-[#302b23] bg-[#0b0a09]/85 p-1 text-xs text-[#e4dac9]">
-        <button type="button" className="rounded px-2.5 py-1.5 pointer-coarse:min-h-11 pointer-coarse:min-w-11 hover:bg-white/10"
-          onClick={() => playback.current?.replay()}>Replay</button>
-        <button type="button" className="rounded px-2.5 py-1.5 pointer-coarse:min-h-11 pointer-coarse:min-w-11 hover:bg-white/10 disabled:opacity-40" disabled={mode === "now"}
-          onClick={() => playback.current?.toggle()}>{mode === "paused" ? "Resume" : "Pause"}</button>
-        <button type="button" className="rounded px-2.5 py-1.5 pointer-coarse:min-h-11 pointer-coarse:min-w-11 hover:bg-white/10 disabled:opacity-40" disabled={mode === "now"}
-          onClick={() => playback.current?.now()}>Now</button>
+      {!unavailable && <div ref={pins} className="landmarks">
+        {landmarks.map(({ id, position, name, caption, kind, range, select }) => {
+          const props = { className: "landmark", "data-world": position.toArray().join(","), "data-kind": kind, "data-range": range };
+          return select ? <button key={id} {...props} type="button" onClick={select}>
+            <span>{name}</span>{caption && <small>{caption}</small>}
+          </button> : <div key={id} {...props}><span>{name}</span>{caption && <small>{caption}</small>}</div>;
+        })}
       </div>}
-      {!unavailable && mode !== "now" &&
-        <p className="pointer-events-none absolute left-5 right-5 top-16 text-xs text-[#c5bcad]">
-          Progressively revealing the catalogue
-        </p>}
-      <p className="pointer-events-none absolute inset-x-5 bottom-5 text-xs text-[#c5bcad]">
-        {unavailable ? "3D is unavailable. Use the catalogue controls to explore."
-          : <>
-            <span className="pointer-coarse:hidden">Drag to orbit · Right-drag to pan · Scroll to zoom</span>
-            <span className="hidden pointer-coarse:inline">Drag to orbit · Two fingers to pan · Pinch to zoom</span>
-          </>}
-      </p>
+      {hovered && <div className="filament-hint" style={{ left: hovered.x, top: hovered.y }}>{hovered.text}</div>}
+      {!unavailable && ordered.length > 0 && <div role="group" aria-label="Filament replay" className="replay">
+        <button type="button" onClick={() => playback.current?.replay()}>Replay</button>
+        {mode !== "now" && <>
+          <button type="button" onClick={() => playback.current?.toggle()}>{mode === "paused" ? "Resume" : "Pause"}</button>
+          <button type="button" onClick={() => playback.current?.now()}>Now</button>
+        </>}
+      </div>}
+      {unavailable && <p className="scene-message">3D is unavailable. Search and artwork browsing are still available.</p>}
     </div>
   );
 }
