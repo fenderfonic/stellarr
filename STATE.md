@@ -1,0 +1,7 @@
+# Stage 1 checkpoint · 2026-11-24
+
+- Standalone Vite/React frontend and FastAPI fixture endpoint. The production build is served by FastAPI. The synthetic catalogue contains 726 entities and 1,456 links across movies, television and music. Shared credits, adaptations, and original scores provide fixture connections between galaxies.
+- Extracted the pinned Fungai renderer, navigation and replay. Source comparison verified the original layout, curve construction, OrbitControls setup, camera easing and replay timing. The port adds search and filter illumination and restores camera pose on Back.
+- `npm run build` passed. API checks verified unique entity and link IDs and valid endpoints. Chromium with software WebGL verified orbit, pan, zoom, canvas selection, search, availability and galaxy filtering, focus, a film-to-score hop, rendered view restoration on Back and Home, and replay/pause/resume. A touch-enabled tablet viewport verified layout and tap-to-focus.
+- Visual evidence is in [evidence](evidence/). Vite reports a 764 kB JavaScript chunk (207 kB gzip). Physical tablet gestures and hardware performance remain unmeasured.
+- Next action after authorisation is Stage 2. Verify native Radarr and Sonarr API contracts, then add adapters and SQLite persistence. Live sources and real artwork remain for that stage, with large-catalogue benchmarking in Stage 3 and container packaging in Stage 4.
