@@ -76,7 +76,7 @@ export type SceneView = { pose: () => CameraPose };
 
 export type EntityFocus = { entity: MediaNode; edges: Filament[] };
 
-export function FilamentScene({ filaments, ordered, selected, entityFocus, cameraRequest, restoredPose, sceneView, matches, onSelect, onReveal }: {
+export function FilamentScene({ filaments, ordered, selected, entityFocus, cameraRequest, restoredPose, sceneView, matches, onSelect, onReveal, isolated, onSelectNode }: {
   filaments: Filament[];
   ordered: Filament[];
   selected?: string;
@@ -86,6 +86,8 @@ export function FilamentScene({ filaments, ordered, selected, entityFocus, camer
   sceneView: React.RefObject<SceneView | null>;
   matches: ReadonlySet<string> | null;
   onSelect: (id: string) => void;
+  isolated: MediaNode[];
+  onSelectNode: (node: MediaNode) => void;
   onReveal: (count: number | null) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
@@ -110,7 +112,7 @@ export function FilamentScene({ filaments, ordered, selected, entityFocus, camer
 
   useEffect(() => {
     const mount = host.current;
-    if (!mount || !filaments.length) return;
+    if (!mount || !(filaments.length || isolated.length)) return;
     let renderer: T.WebGLRenderer;
     try {
       renderer = new T.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "low-power" });
@@ -125,6 +127,13 @@ export function FilamentScene({ filaments, ordered, selected, entityFocus, camer
     mount.appendChild(canvas);
 
     const { positions, place } = layout(filaments);
+    // Render unlinked catalogue entries as points with the existing placement and palette.
+    const starCoordinates = new Float32Array(isolated.length * 3);
+    isolated.forEach((node, index) => {
+      const point = place(node);
+      positions.set(node.id, point);
+      point.toArray(starCoordinates, index * 3);
+    });
     const scene = new T.Scene();
     const camera = new T.PerspectiveCamera(42, 1, 0.2, 550);
     const bounds = new T.Box3().setFromPoints([...positions.values()]).getBoundingSphere(new T.Sphere());
@@ -167,6 +176,13 @@ export function FilamentScene({ filaments, ordered, selected, entityFocus, camer
     });
     const network = new T.LineSegments(geometry, material);
     scene.add(network);
+    const starGeometry = new T.BufferGeometry();
+    starGeometry.setAttribute("position", new T.BufferAttribute(starCoordinates, 3));
+    const starColors = new Float32Array(isolated.length * 3);
+    starGeometry.setAttribute("color", new T.BufferAttribute(starColors, 3));
+    const starMaterial = new T.PointsMaterial({ size: 3, sizeAttenuation: false, vertexColors: true });
+    const stars = new T.Points(starGeometry, starMaterial);
+    scene.add(stars);
     const focusGeometry = new T.BufferGeometry();
     const focusPoints = new T.Float32BufferAttribute(new Float32Array(segments * 6), 3);
     focusGeometry.setAttribute("position", focusPoints);
@@ -198,10 +214,18 @@ export function FilamentScene({ filaments, ordered, selected, entityFocus, camer
     let localVisible: Filament[] = [];
 
     let frame = 0;
+    let firstDraw = true;
+    let sized = false;
     let visible = ordered.length;
     const draw = () => {
       cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => renderer.render(scene, camera));
+      frame = requestAnimationFrame(() => {
+        renderer.render(scene, camera);
+        if (firstDraw && sized) {
+          performance.mark("stellarr:first-scene-frame");
+          firstDraw = false;
+        }
+      });
     };
     const resize = new ResizeObserver(() => {
       if (!mount.clientWidth || !mount.clientHeight) return;
@@ -209,6 +233,7 @@ export function FilamentScene({ filaments, ordered, selected, entityFocus, camer
       camera.zoom = Math.min(1, camera.aspect * 1.18);
       camera.updateProjectionMatrix();
       renderer.setSize(mount.clientWidth, mount.clientHeight);
+      sized = true;
       draw();
     });
     resize.observe(mount);
@@ -219,6 +244,11 @@ export function FilamentScene({ filaments, ordered, selected, entityFocus, camer
         const end = (index + 1) * segments * 8;
         for (let i = index * segments * 8 + 3; i < end; i += 4) colors[i] = alpha;
       });
+      isolated.forEach((node, index) => {
+        const brightness = ids ? (ids.has(node.id) ? 1 : 0.08) : 0.42;
+        starColors.set([ivory.r * brightness, ivory.g * brightness, ivory.b * brightness], index * 3);
+      });
+      starGeometry.getAttribute("color").needsUpdate = true;
       geometry.getAttribute("color").needsUpdate = true;
       draw();
     };
@@ -395,7 +425,7 @@ export function FilamentScene({ filaments, ordered, selected, entityFocus, camer
     let down: [number, number] | undefined;
     const start = (event: PointerEvent) => { down = [event.clientX, event.clientY]; };
     const pick = (event: PointerEvent) => {
-      if (!visible || !down || event.button !== 0 || Math.hypot(event.clientX - down[0], event.clientY - down[1]) > 5) return;
+      if ((!visible && !isolated.length) || !down || event.button !== 0 || Math.hypot(event.clientX - down[0], event.clientY - down[1]) > 5) return;
       const rect = canvas.getBoundingClientRect();
       ray.params.Line!.threshold = Math.max(0.08, camera.position.distanceTo(controls.target) / Math.max(rect.height, 1) * 4);
       ray.setFromCamera(new T.Vector2(2 * (event.clientX - rect.left) / rect.width - 1,
@@ -407,7 +437,15 @@ export function FilamentScene({ filaments, ordered, selected, entityFocus, camer
       }
       const hit = ray.intersectObject(network)[0];
       const index = hit?.index === undefined ? -1 : Math.floor(hit.index / (segments * 2));
-      if (index >= 0 && index < visible) onSelect(ordered[index].id);
+      if (index >= 0 && index < visible) {
+        onSelect(ordered[index].id);
+        return;
+      }
+      if (isolated.length) {
+        ray.params.Points!.threshold = ray.params.Line!.threshold;
+        const star = ray.intersectObject(stars)[0];
+        if (star?.index !== undefined) onSelectNode(isolated[star.index]);
+      }
     };
     const lost = () => {
       now();
@@ -433,6 +471,8 @@ export function FilamentScene({ filaments, ordered, selected, entityFocus, camer
       canvas.removeEventListener("pointerup", pick);
       canvas.removeEventListener("webglcontextlost", lost);
       geometry.dispose();
+      starGeometry.dispose();
+      starMaterial.dispose();
       material.dispose();
       focusGeometry.dispose();
       focusMaterial.dispose();
@@ -443,12 +483,12 @@ export function FilamentScene({ filaments, ordered, selected, entityFocus, camer
       renderer.dispose();
       canvas.remove();
     };
-  }, [filaments, ordered, onSelect, onReveal, sceneView]);
+  }, [filaments, ordered, onSelect, onReveal, sceneView, isolated, onSelectNode]);
 
   return (
     <div className="relative h-[72vh] min-h-[390px] max-sm:pointer-coarse:h-[48svh] max-sm:pointer-coarse:min-h-[300px] overflow-hidden rounded-xl border border-[#28251e] bg-[radial-gradient(ellipse_at_52%_48%,#131211_0%,#0a0a09_49%,#050506_100%)]">
       <div ref={host} className="absolute inset-0" />
-      {!unavailable && <div role="group" aria-label="Filament replay"
+      {!unavailable && ordered.length > 0 && <div role="group" aria-label="Filament replay"
         className="absolute right-4 top-4 flex gap-1 rounded-md border border-[#302b23] bg-[#0b0a09]/85 p-1 text-xs text-[#e4dac9]">
         <button type="button" className="rounded px-2.5 py-1.5 pointer-coarse:min-h-11 pointer-coarse:min-w-11 hover:bg-white/10"
           onClick={() => playback.current?.replay()}>Replay</button>
@@ -459,7 +499,7 @@ export function FilamentScene({ filaments, ordered, selected, entityFocus, camer
       </div>}
       {!unavailable && mode !== "now" &&
         <p className="pointer-events-none absolute left-5 right-5 top-16 text-xs text-[#c5bcad]">
-          Progressively revealing the fixture catalogue
+          Progressively revealing the catalogue
         </p>}
       <p className="pointer-events-none absolute inset-x-5 bottom-5 text-xs text-[#c5bcad]">
         {unavailable ? "3D is unavailable. Use the catalogue controls to explore."

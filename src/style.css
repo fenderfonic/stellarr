@@ -52,3 +52,9 @@ li small { display: block; color: var(--muted); margin-top: 2px; }
 @media (pointer: coarse) {
   button, input, select { min-height: 44px; }
 }
+.mode-link { border: 1px solid var(--line); padding: 7px 12px; border-radius: 5px; font-size: .83rem; }
+.mode-link:hover { background-color: #231e17; }
+.genre-filter { margin-top: 10px; }
+.media-artwork { width: 100%; max-height: 270px; object-fit: contain; object-position: left center; margin: 8px 0 12px; border-radius: 4px; }
+.media-artwork[hidden] { display: none; }
+.empty-scene { padding: 28px; border: 1px solid var(--line); border-radius: 12px; color: var(--muted); min-height: 390px; }

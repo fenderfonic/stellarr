@@ -3,3 +3,9 @@ dist/
 .venv/
 __pycache__/
 .DS_Store
+
+# Local connection settings and catalogue
+.env
+.env.*
+!.env.example
+data/

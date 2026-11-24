@@ -4,7 +4,7 @@ import type { MediaNode, Filament } from "./graph";
 
 const labels: Record<string, string> = {
   Movie: "Film", Series: "TV series", Episode: "Episode", Person: "Person",
-  MusicAlbum: "Album", Audio: "Track", MusicArtist: "Artist", Composer: "Composer",
+  MusicAlbum: "Album", Audio: "Track", MusicArtist: "Artist", Collection: "Collection", Composer: "Composer",
 };
 
 export function entityKind(entity: MediaNode) {
@@ -77,19 +77,23 @@ export function prepareSearch(entities: Iterable<MediaNode>) {
       type = nameKey(`${entity.kind} ${kindLabel(entity.kind)}`);
       types.set(entity.kind, type);
     }
-    return { entity, name: nameKey(entity.name), type };
+    const metadata = nameKey([
+      entity.seriesTitle, ...(entity.genres ?? []), entity.year, ...Object.values(entity.externalIds ?? {}),
+    ].filter(Boolean).join(" "));
+    return { entity, name: nameKey(entity.name), type, metadata };
   });
 }
 
 export function searchEntities(entries: ReturnType<typeof prepareSearch>, query: string, kind: string,
-  availability: string) {
+  availability: string, genre: string) {
   const term = nameKey(query.trim());
   const words = term ? term.split(" ") : [];
   const results: MediaNode[][] = [[], [], [], []];
-  for (const { entity, name, type } of entries) {
+  for (const { entity, name, type, metadata } of entries) {
     if (kind && entity.galaxy !== kind) continue;
     if (availability && entity.availability !== availability) continue;
-    if (!words.every((word) => name.includes(word) || type.includes(word))) continue;
+    if (genre && !entity.genres?.includes(genre)) continue;
+    if (!words.every((word) => name.includes(word) || type.includes(word) || metadata.includes(word))) continue;
     const rank = name === term ? 0 : name.startsWith(term) ? 1 : name.includes(term) ? 2 : 3;
     results[rank].push(entity);
   }
